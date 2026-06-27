@@ -1,0 +1,58 @@
+{
+  "name": "@vulos/board-ui",
+  "private": false,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Collaborative-whiteboard React component for Vulos — an Excalidraw editor with a Yjs CRDT core that embeds into multiple host apps (Workspace, Meet, Talk).",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build --config vite.config.lib.ts",
+    "preview": "vite preview",
+    "server": "node server/index.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
+    },
+    "./style.css": "./dist/board-ui.css",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "server/",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "yjs": "^13.6.18",
+    "y-websocket": "^2.0.4",
+    "y-protocols": "^1.0.6"
+  },
+  "peerDependencies": {
+    "@excalidraw/excalidraw": "^0.18.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@excalidraw/excalidraw": "^0.18.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.4.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.6.3",
+    "vite": "^6.3.5",
+    "vite-plugin-dts": "^4.3.0",
+    "ws": "^8.18.0"
+  }
+}
