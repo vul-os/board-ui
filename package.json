@@ -10,6 +10,7 @@
     "prepare": "npm run build",
     "preview": "vite preview",
     "server": "node server/index.mjs",
+    "test": "node --test server/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "main": "./dist/index.cjs",

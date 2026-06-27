@@ -340,18 +340,32 @@ server is **dev-only** and is **not** shipped in the npm package (excluded from
 | `BOARD_AUTH_SECRET` | — | HMAC token secret. **Set ⇒ SECURE** (token required); unset ⇒ DEV |
 | `BOARD_ALLOWED_ORIGINS` | — | Origin allow-list for the WS upgrade (space/comma sep; CSWSH defence). Empty ⇒ not checked |
 | `BOARD_MAX_BLOB_BYTES` | `10485760` (10 MiB) | max image dataURL kept in the Y.Doc; larger blobs are pruned |
-| `BOARD_MAX_MESSAGE_BYTES` | `16777216` (16 MiB) | max WS frame size (must be ≥ blob cap) |
-| `BOARD_MAX_ROOM_CONNS` | `64` | max concurrent connections per room |
-| `BOARD_MAX_CONNS` | `1024` | max concurrent connections server-wide |
+| `BOARD_MAX_MESSAGE_BYTES` | `16777216` (16 MiB) | max WS frame size; **must be ≥ `BOARD_MAX_BLOB_BYTES`** — validated at startup (the server refuses to start otherwise) |
+| `BOARD_MAX_ROOM_CONNS` | `64` | max concurrent connections per room (enforced atomically at upgrade) |
+| `BOARD_MAX_CONNS` | `1024` | max concurrent connections server-wide (enforced atomically at upgrade) |
+| `BOARD_MAX_TOKEN_TTL_SECONDS` | `3600` (1 h) | SECURE mode: max allowed token lifetime (`exp − now`); over-long-lived tokens are rejected. `0` disables this bound |
 
-**Auth (mirrors `server-go/auth.go`).** When `BOARD_AUTH_SECRET` is set the WS
-upgrade requires a valid `?token=` whose optional `room` claim matches the joined
-room; tokens are the same HMAC shape as the Go server
+> **Frame ≥ blob invariant.** A single image dataURL rides in one WS frame, so
+> if the frame cap were below the blob cap a legitimately-sized blob would be
+> silently dropped by `ws` before the blob-pruning observer ever saw it. The
+> server validates `BOARD_MAX_MESSAGE_BYTES >= BOARD_MAX_BLOB_BYTES` at startup
+> and throws a clear error if it is misconfigured.
+
+**Auth (mirrors `server-go/auth.go`, but stricter on `exp`).** When
+`BOARD_AUTH_SECRET` is set the WS upgrade requires a valid `?token=` whose
+optional `room` claim matches the joined room; tokens are the same HMAC shape as
+the Go server
 (`base64url(payload).base64url(HMAC_SHA256(secret, base64url(payload)))`,
-`payload = {"exp":…,"room":…}`), compared in constant time. **Tokens travel in
-the connection URL** (a y-websocket constraint) so they may land in logs/history
-— mint them short-lived, room-scoped and ideally single-use; never pass a
-long-lived bearer token (see `WebsocketProviderOptions.token`).
+`payload = {"exp":…,"room":…}`), compared in constant time.
+
+**Tokens travel in the connection URL** (a y-websocket constraint) so they may
+land in logs/proxies/history. Because of that, in SECURE mode this server makes
+`exp` **REQUIRED** — a token without a valid, unexpired `exp` is rejected, and a
+token whose lifetime exceeds `BOARD_MAX_TOKEN_TTL_SECONDS` (default 1 h) is also
+rejected. **Always mint tokens short-lived, room-scoped, and ideally single-use;
+never pass a long-lived bearer token** (see `WebsocketProviderOptions.token`).
+The OS gateway / CP is the intended minter and should stamp a fresh, narrow
+`exp` per board-iframe connection.
 
 **Dev mode (no secret).** The server refuses to bind anywhere but `127.0.0.1`,
 runs without auth, and prints a loud `INSECURE DEV SERVER` warning. This keeps
