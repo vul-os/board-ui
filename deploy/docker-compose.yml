@@ -1,0 +1,75 @@
+# Vulos Board — production sync server (server-go/).
+#
+# Runs the single CGO-free Go binary that speaks the y-websocket protocol at
+# /ws/{room}. This is the PRODUCTION backend behind board.vulos.org; the Node
+# `npm run server` (server/index.mjs) is dev-only and is NOT deployed.
+#
+#   cp .env.example .env      # then edit BOARD_AUTH_SECRET (+ storage, for prod)
+#   docker compose up --build
+#   → board sync server on http://localhost:8080  (ws at /ws/{room})
+#
+# DEFAULT MODE = disk fallback + auth OFF (local dev). For production set
+# BOARD_AUTH_SECRET (must match the OS control plane + CP token minter) and the
+# VULOS_STORAGE_* seam so snapshots persist to the shared bucket instead of the
+# `board-data` volume. board.vulos.org should TLS-terminate and reverse-proxy
+# /ws/ to this service (the env values below are all read from .env).
+
+name: vulos-board
+
+services:
+  board:
+    # Build context is the sibling server-go/ dir (its Dockerfile is self-
+    # contained: CGO_ENABLED=0 static build of the whole tree incl. ygo).
+    build:
+      context: ../server-go
+      dockerfile: Dockerfile
+    image: vulos/board-server
+    restart: unless-stopped
+    ports:
+      # Host:container. BOARD_LISTEN_ADDR stays :8080 inside the container; put a
+      # TLS-terminating reverse proxy (board.vulos.org) in front for production.
+      - "${BOARD_HOST_PORT:-8080}:8080"
+    environment:
+      # ── Server ────────────────────────────────────────────────────────────
+      BOARD_LISTEN_ADDR: "${BOARD_LISTEN_ADDR:-:8080}"
+      # CORS allow-list for the WS upgrade (space/comma separated). Empty ⇒ ygo
+      # falls back to a same-origin check; set this to the host origin(s) that
+      # embed the board iframe behind the proxy.
+      BOARD_ALLOWED_ORIGINS: "${BOARD_ALLOWED_ORIGINS:-}"
+
+      # ── Auth (seam A) ─────────────────────────────────────────────────────
+      # HMAC secret used to verify ?token= on the upgrade. MUST be identical to
+      # the value the OS control plane (/api/board/token) and the CP use to MINT
+      # tokens. Empty ⇒ auth OFF (dev only — server accepts every connection).
+      BOARD_AUTH_SECRET: "${BOARD_AUTH_SECRET:-}"
+
+      # ── Persistence: disk fallback (default) ──────────────────────────────
+      # Used when the storage seam below is unset. Snapshots land at
+      # ${BOARD_DATA_DIR}/board/<room>.bin on the `board-data` volume.
+      BOARD_DATA_DIR: "${BOARD_DATA_DIR:-/data}"
+
+      # ── Persistence: bucket (opt-in — the Vulos storage seam) ─────────────
+      # Set ENDPOINT + BUCKET (both required) to switch from disk to the shared
+      # object store; snapshots are written to <PREFIX>board/<room>.bin.
+      VULOS_STORAGE_ENDPOINT: "${VULOS_STORAGE_ENDPOINT:-}"
+      VULOS_STORAGE_BUCKET: "${VULOS_STORAGE_BUCKET:-}"
+      VULOS_STORAGE_PREFIX: "${VULOS_STORAGE_PREFIX:-}"
+      VULOS_STORAGE_REGION: "${VULOS_STORAGE_REGION:-us-east-1}"
+      VULOS_STORAGE_ACCESS_KEY: "${VULOS_STORAGE_ACCESS_KEY:-}"
+      VULOS_STORAGE_SECRET_KEY: "${VULOS_STORAGE_SECRET_KEY:-}"
+      VULOS_STORAGE_SESSION_TOKEN: "${VULOS_STORAGE_SESSION_TOKEN:-}"
+    volumes:
+      # Disk-fallback snapshots persist across restarts. Unused (but harmless)
+      # once the VULOS_STORAGE_* bucket seam is configured.
+      - board-data:/data
+    healthcheck:
+      # The server exposes GET /healthz → "ok". Use a pure-Go HTTP check via the
+      # binary's own runtime is overkill; wget ships in the alpine base image.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  board-data:

@@ -268,6 +268,47 @@ go test ./...         # snapshot round-trip + auth tests
 docker build -t vulos-board-server .
 ```
 
+## Deploy
+
+The production board server is the Go binary in `server-go/`. The Node
+`npm run server` (`server/index.mjs`) is **dev-only** and is never deployed.
+
+**Run it (compose).** `deploy/docker-compose.yml` builds `server-go/`'s
+Dockerfile, publishes the port, and wires every env var from a `.env`:
+
+```bash
+cd deploy
+cp .env.example .env        # then edit BOARD_AUTH_SECRET (+ VULOS_STORAGE_* for prod)
+docker compose up --build   # board sync server on :8080, ws at /ws/{room}
+```
+
+Defaults reproduce the dev posture (disk persistence on the `board-data`
+volume, auth OFF). For production set `BOARD_AUTH_SECRET` and the
+`VULOS_STORAGE_*` seam (see [Configuration](#configuration)). `GET /healthz`
+returns `ok` for load-balancer checks.
+
+**Connection contract.** Hosts connect to
+`wss://board.vulos.org/ws/<room>?token=<hmac>`. The room is the board id and
+arrives verbatim as the trailing path segment of `/ws/{room}`; `?token=` is the
+HMAC token verified on the upgrade (see [Auth](#board-sync-server-go) above).
+
+**TLS + proxy.** `board.vulos.org` should **TLS-terminate** and **reverse-proxy
+`/ws/`** (WebSocket upgrade) to this service. The container listens plaintext on
+`:8080`; no TLS lives in the board server itself.
+
+**Bucket layout.** With the storage seam configured, each room persists to
+`<VULOS_STORAGE_PREFIX>board/<room>.bin` in the bucket (one debounced
+full-snapshot `PutObject` per room). Without it, snapshots fall back to
+`<BOARD_DATA_DIR>/board/<room>.bin` on disk.
+
+**Shared secret.** `BOARD_AUTH_SECRET` **must be byte-for-byte identical**
+across the board server, the Vulos OS (`/api/board/token`, which mints the
+token), and the CP (which hands it to the board iframe). A mismatch rejects
+every upgrade.
+
+`deploy/docker-compose.yml` and `deploy/.env.example` are deploy artifacts and
+are **not** part of the npm package (excluded by `package.json` `files`).
+
 ## Configuration
 
 Production Go sync server (`server-go/`) environment:
