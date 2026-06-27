@@ -1,0 +1,5 @@
+# Compiled binaries (the binary is named after the module dir / build output).
+/server-go
+/board-server
+# Local disk-fallback snapshots.
+/.board-data/

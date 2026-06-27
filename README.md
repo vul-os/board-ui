@@ -158,9 +158,11 @@ const provider = createWebsocketProvider({ url: 'wss://boards.example', room: bo
 <BoardApp ydoc={ydoc} awareness={provider.awareness} user={me} boardId={boardId} />
 ```
 
-The bundled `npm run server` persists each room's snapshot. In production it
-persists to the Vulos storage bucket under a `board/<room>.bin` key (see the
-storage-bucket seam / TODO in `server/index.mjs`).
+In **production** the board is served by the Go sync server in `server-go/`
+(see [Board sync server (Go)](#board-sync-server-go) below), which persists each
+room's opaque Yjs snapshot to the Vulos storage bucket under a `board/<room>.bin`
+key. The Node `npm run server` (`server/index.mjs`) is the **dev-only fallback**
+— same y-websocket wire protocol, disk snapshots — for local hacking.
 
 ### 2. Meet — LiveKit data channel
 
@@ -209,16 +211,85 @@ ordinary `y-protocols` Awareness — encode/apply its updates with
 `y-protocols/awareness` `encodeAwarenessUpdate`/`applyAwarenessUpdate` over your
 channel, or just pass a provider's `.awareness`.
 
+## Board sync server (Go)
+
+`server-go/` is the **production** board sync backend: a single CGO-free static
+Go binary that mirrors how [wede](https://github.com/) does server-side Yjs. It
+embeds [`github.com/reearth/ygo`](https://github.com/reearth/ygo) — a pure-Go,
+cgo-free, Yjs-v13 wire-compatible CRDT — and its `provider/websocket.Server`
+speaks the exact y-websocket protocol (sync step1/2, update, awareness) that
+`createWebsocketProvider` (a standard `y-websocket` `WebsocketProvider`) uses. It
+is a separate Go module (`github.com/vul-os/board-ui/server-go`) and is **not**
+part of the npm package (excluded from `files`/`tsconfig`/`vite`).
+
+It never parses Excalidraw: a board's content is `doc.getMap('elements')` +
+`doc.getMap('files')`, but to the server it is an opaque snapshot. Persistence is
+the raw `crdt.EncodeStateAsUpdateV1(doc, nil)` bytes per room.
+
+**Endpoint & rooms.** The server serves the y-websocket endpoint at `/ws/{room}`.
+The `y-websocket` client connects to `${url}/${room}`, so the host default
+`VITE_BOARD_WS_URL = wss://board.vulos.org/ws` resolves to
+`wss://board.vulos.org/ws/<room>?token=…`. The room is the board id
+(e.g. `userid:default` or a channel id) and arrives verbatim as the trailing
+path segment (`:` is a legal path char); ygo reads it from the `{room}` path
+value. **No host change is needed** for that default — just terminate TLS and
+proxy `/ws/` to this server. For the storage key the room is sanitised to
+`[A-Za-z0-9._-]` (anything else → `_`), matching the Node dev server.
+
+**Persistence.** Bucket layout `<VULOS_STORAGE_PREFIX>board/<room>.bin`; the
+snapshot format is `EncodeStateAsUpdateV1`. Writes are debounced ~600ms (like
+wede) then one full-snapshot `PutObject` (atomic per key). The S3/MinIO client is
+`minio-go/v7` (matching vulos-mail's `internal/blob` convention). When the
+storage seam env is unset, a **disk fallback** writes `<BOARD_DATA_DIR>/board/<room>.bin`
+(temp-file + rename) for local dev. The active mode is logged at startup. A
+plaintext (non-https) external endpoint is refused unless it is loopback/private.
+
+**Auth (seam A).** If `BOARD_AUTH_SECRET` is set, the websocket upgrade requires
+a valid `?token=`, verified with HMAC-SHA256 + `crypto/subtle.ConstantTimeCompare`.
+Token shape (mintable by the OS gateway / CP, the intended minter):
+
+```
+token = base64url(payloadJSON) + "." + base64url(HMAC_SHA256(secret, base64url(payloadJSON)))
+payloadJSON = {"exp": <unix-seconds, optional>, "room": "<board id, optional>"}
+```
+
+`exp` (if present) is enforced; `room` (if non-empty) must equal the joined room.
+If `BOARD_AUTH_SECRET` is unset the server runs open and logs a warning (dev).
+
+```bash
+cd server-go
+go build .            # CGO_ENABLED=0 works — proves pure-Go
+./server-go           # disk mode on :8080, auth off (dev)
+go test ./...         # snapshot round-trip + auth tests
+docker build -t vulos-board-server .
+```
+
 ## Configuration
 
-Sync server (`npm run server`) environment:
+Production Go sync server (`server-go/`) environment:
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `BOARD_LISTEN_ADDR` | `:8080` | HTTP listen address (serves `/ws/{room}`, `/healthz`) |
+| `BOARD_DATA_DIR` | `./.board-data` | disk-fallback snapshot dir (when no storage seam) |
+| `BOARD_AUTH_SECRET` | — | HMAC token secret; unset ⇒ auth disabled (dev) |
+| `BOARD_ALLOWED_ORIGINS` | — | CORS allow-list for the WS upgrade (space/comma sep); empty ⇒ same-origin |
+| `VULOS_STORAGE_ENDPOINT` | — | object-store URL (`https://…` or loopback/private `http://`); empty ⇒ disk |
+| `VULOS_STORAGE_BUCKET` | — | bucket name (required for bucket mode) |
+| `VULOS_STORAGE_PREFIX` | — | key prefix (e.g. `board-app/`) |
+| `VULOS_STORAGE_REGION` | `us-east-1` | S3 region |
+| `VULOS_STORAGE_ACCESS_KEY` / `_SECRET_KEY` / `_SESSION_TOKEN` | — | credentials (STS token optional) |
+
+It is designed to sit behind the OS gateway proxy at `/app/board/` like the
+other products.
+
+Node dev-fallback server (`npm run server`, `server/index.mjs`) environment:
 
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `1234` | websocket port |
 | `HOST` | `0.0.0.0` | bind address |
 | `BOARD_DATA_DIR` | `./.board-data` | local snapshot dir |
-| `VULOS_STORAGE_*` | — | storage-bucket seam (see `server/index.mjs` TODO) |
 
 Demo host honours `VITE_BOARD_SERVER` (default `ws://localhost:1234`) and a
 `?board=<id>` query param.
