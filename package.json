@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build --config vite.config.lib.ts",
+    "prepare": "npm run build",
     "preview": "vite preview",
     "server": "node server/index.mjs",
     "typecheck": "tsc --noEmit"
