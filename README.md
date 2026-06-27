@@ -76,6 +76,10 @@ Open the demo in two browser tabs and draw — elements and cursors sync live.
 This demo *is* the Workspace integration mode in miniature
 (`createWebsocketProvider` → the bundled server).
 
+Want it with **no backend at all**? `npm run dev` then open
+`http://localhost:5174/local.html` — the `examples/local-doc` host wires a plain
+local `Y.Doc` straight into `<BoardApp/>` (no server, no provider, solo).
+
 ## How it works
 
 ```
@@ -283,16 +287,40 @@ Production Go sync server (`server-go/`) environment:
 It is designed to sit behind the OS gateway proxy at `/app/board/` like the
 other products.
 
-Node dev-fallback server (`npm run server`, `server/index.mjs`) environment:
+Node dev-fallback server (`npm run server`, `server/index.mjs`) environment. This
+server is **dev-only** and is **not** shipped in the npm package (excluded from
+`files`); production uses the Go server above.
 
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `1234` | websocket port |
-| `HOST` | `0.0.0.0` | bind address |
+| `HOST` | `0.0.0.0` (secure) / forced `127.0.0.1` (dev) | bind address — see below |
 | `BOARD_DATA_DIR` | `./.board-data` | local snapshot dir |
+| `BOARD_AUTH_SECRET` | — | HMAC token secret. **Set ⇒ SECURE** (token required); unset ⇒ DEV |
+| `BOARD_ALLOWED_ORIGINS` | — | Origin allow-list for the WS upgrade (space/comma sep; CSWSH defence). Empty ⇒ not checked |
+| `BOARD_MAX_BLOB_BYTES` | `10485760` (10 MiB) | max image dataURL kept in the Y.Doc; larger blobs are pruned |
+| `BOARD_MAX_MESSAGE_BYTES` | `16777216` (16 MiB) | max WS frame size (must be ≥ blob cap) |
+| `BOARD_MAX_ROOM_CONNS` | `64` | max concurrent connections per room |
+| `BOARD_MAX_CONNS` | `1024` | max concurrent connections server-wide |
 
-Demo host honours `VITE_BOARD_SERVER` (default `ws://localhost:1234`) and a
-`?board=<id>` query param.
+**Auth (mirrors `server-go/auth.go`).** When `BOARD_AUTH_SECRET` is set the WS
+upgrade requires a valid `?token=` whose optional `room` claim matches the joined
+room; tokens are the same HMAC shape as the Go server
+(`base64url(payload).base64url(HMAC_SHA256(secret, base64url(payload)))`,
+`payload = {"exp":…,"room":…}`), compared in constant time. **Tokens travel in
+the connection URL** (a y-websocket constraint) so they may land in logs/history
+— mint them short-lived, room-scoped and ideally single-use; never pass a
+long-lived bearer token (see `WebsocketProviderOptions.token`).
+
+**Dev mode (no secret).** The server refuses to bind anywhere but `127.0.0.1`,
+runs without auth, and prints a loud `INSECURE DEV SERVER` warning. This keeps
+the current tokenless local Workspace/Talk integrations working without ever
+exposing an open, unauthenticated board server on all interfaces.
+
+Demo hosts honour `VITE_BOARD_SERVER` (default `ws://localhost:1234`) and a
+`?board=<id>` query param. A **zero-server** variant (`examples/local-doc`,
+served at `/local.html`) needs no backend at all — a plain local `Y.Doc` handed
+straight to `<BoardApp/>`.
 
 ## Development
 

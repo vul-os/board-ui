@@ -31,6 +31,36 @@ export interface ExcalidrawSceneAPI {
   getFiles(): Record<string, BoardFile>
 }
 
+/**
+ * Raster image mime types we accept from remote peers. SVG (image/svg+xml) and
+ * markup (text/html, …) are deliberately excluded: they can carry script and
+ * would be a stored-XSS vector if a peer-supplied dataURL were ever rendered as
+ * markup. Defence-in-depth — a malicious/compromised peer must not be able to
+ * push an active-content "image" into our editor via the CRDT.
+ */
+const ALLOWED_IMAGE_MIME = new Set<string>([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'image/bmp',
+  'image/x-icon',
+  'image/avif',
+])
+
+/**
+ * Accept a remote file only when BOTH its declared `mimeType` and the mime
+ * encoded in the dataURL itself are in the raster-image allow-list. Checking the
+ * dataURL prefix too stops a `mimeType: image/png` / `dataURL: data:text/html…`
+ * mismatch from slipping through.
+ */
+function isAllowedImage(f: BoardFile): boolean {
+  if (!f || !ALLOWED_IMAGE_MIME.has(f.mimeType)) return false
+  const m = /^data:([^;,]+)[;,]/.exec(typeof f.dataURL === 'string' ? f.dataURL : '')
+  const declared = m?.[1]?.toLowerCase()
+  return !!declared && ALLOWED_IMAGE_MIME.has(declared)
+}
+
 /** Order elements the way Excalidraw expects (fractional index when present). */
 function sortElements(elements: BoardElement[]): BoardElement[] {
   return elements.sort((a, b) => {
@@ -134,7 +164,16 @@ export class ExcalidrawYBinding {
   private pushFiles(): void {
     if (this.yFiles.size === 0) return
     const existing = this.api.getFiles()
-    const incoming = [...this.yFiles.values()].filter((f) => f && !existing[f.id])
+    const incoming = [...this.yFiles.values()].filter((f) => {
+      if (!f || existing[f.id]) return false
+      if (!isAllowedImage(f)) {
+        // Drop non-image / active-content blobs from peers (e.g. svg+xml,
+        // text/html). They never reach Excalidraw's file store.
+        console.warn(`[vulos-board] rejected remote file with disallowed mime "${f?.mimeType}"`)
+        return false
+      }
+      return true
+    })
     if (incoming.length > 0) this.api.addFiles(incoming)
   }
 
