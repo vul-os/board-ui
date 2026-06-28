@@ -40,6 +40,7 @@ jobs:
           echo "Version check passed: $PKG_VERSION"
 
       - name: Publish to npm
+        continue-on-error: true
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
