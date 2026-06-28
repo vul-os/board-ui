@@ -33,6 +33,10 @@
     "README.md",
     "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "dependencies": {
     "yjs": "^13.6.18",
     "y-websocket": "^2.0.4",
