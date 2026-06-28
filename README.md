@@ -82,22 +82,22 @@ local `Y.Doc` straight into `<BoardApp/>` (no server, no provider, solo).
 
 ## How it works
 
-```
-        HOST APP (owns transport + persistence)
-        ┌───────────────────────────────────────────┐
-        │  Y.Doc  ◀──▶  provider  ◀──▶  network       │
-        └───────┬─────────────────────────▲──────────┘
-                │ ydoc + awareness         │ snapshots
-                ▼                          │
-        ┌───────────────────────────────────────────┐
-        │  @vulos/board-ui  <BoardApp/>               │
-        │  ┌─────────────────────────────────────┐   │
-        │  │ ExcalidrawYBinding                  │   │
-        │  │   Y.Map<id, element>  ⇄  Excalidraw │   │
-        │  │   Y.Map<id, file>     (image blobs) │   │
-        │  └─────────────────────────────────────┘   │
-        │  presence: Awareness ⇄ collaborators        │
-        └───────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph host["HOST APP (owns transport + persistence)"]
+        ydoc["Y.Doc"] <--> provider["provider"] <--> network["network"]
+    end
+
+    subgraph board["@vulos/board-ui &lt;BoardApp/&gt;"]
+        subgraph binding["ExcalidrawYBinding"]
+            elems["Y.Map&lt;id, element&gt; ⇄ Excalidraw"]
+            files["Y.Map&lt;id, file&gt; (image blobs)"]
+        end
+        presence["presence: Awareness ⇄ collaborators"]
+    end
+
+    host -->|"ydoc + awareness"| board
+    board -->|"snapshots"| host
 ```
 
 `onChange` diffs the scene against the `Y.Map` and writes only changed/added/
