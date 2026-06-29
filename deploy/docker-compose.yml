@@ -42,6 +42,10 @@ services:
       # the value the OS control plane (/api/board/token) and the CP use to MINT
       # tokens. Empty ⇒ auth OFF (dev only — server accepts every connection).
       BOARD_AUTH_SECRET: "${BOARD_AUTH_SECRET:-}"
+      # When auth is OFF, bind to 127.0.0.1 by default. Set to 1 only for
+      # explicit local-dev cross-machine setups; never in production.
+      BOARD_ALLOW_INSECURE: "${BOARD_ALLOW_INSECURE:-}"
+      BOARD_MAX_TOKEN_TTL_SECONDS: "${BOARD_MAX_TOKEN_TTL_SECONDS:-3600}"
 
       # ── Persistence: disk fallback (default) ──────────────────────────────
       # Used when the storage seam below is unset. Snapshots land at
@@ -58,6 +62,12 @@ services:
       VULOS_STORAGE_ACCESS_KEY: "${VULOS_STORAGE_ACCESS_KEY:-}"
       VULOS_STORAGE_SECRET_KEY: "${VULOS_STORAGE_SECRET_KEY:-}"
       VULOS_STORAGE_SESSION_TOKEN: "${VULOS_STORAGE_SESSION_TOKEN:-}"
+      # ── DoS limits ────────────────────────────────────────────────────────
+      BOARD_MAX_CONNS: "${BOARD_MAX_CONNS:-1024}"
+      BOARD_MAX_ROOM_CONNS: "${BOARD_MAX_ROOM_CONNS:-64}"
+      BOARD_MESSAGE_RATE: "${BOARD_MESSAGE_RATE:-50}"
+      BOARD_MAX_AWARENESS_BYTES: "${BOARD_MAX_AWARENESS_BYTES:-104857600}"
+      BOARD_MAX_BLOB_BYTES: "${BOARD_MAX_BLOB_BYTES:-10485760}"
     volumes:
       # Disk-fallback snapshots persist across restarts. Unused (but harmless)
       # once the VULOS_STORAGE_* bucket seam is configured.

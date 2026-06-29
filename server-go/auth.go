@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,21 +23,33 @@ import (
 //	token = base64url(payloadJSON) + "." + base64url(HMAC_SHA256(secret, base64url(payloadJSON)))
 //
 // where payloadJSON is, e.g. {"exp":1750000000,"room":"userid:default"}.
-//   - exp  (optional): unix seconds; the token is rejected once it passes.
-//   - room (optional): when non-empty it must equal the room being joined, so a
-//     token can be scoped to a single board.
+//   - exp  (REQUIRED): unix seconds; tokens without exp are rejected; tokens
+//     whose exp lies further than MaxTokenTTL seconds in the future are also
+//     rejected (prevents over-long-lived URL-borne tokens). Matches Node's
+//     stricter SECURE-mode policy (index.mjs:257-263).
+//   - room (REQUIRED): must be non-empty and must equal the room being joined.
+//     A room-less token would otherwise act as a master key valid for any room.
+//   - ro   (optional): when true the connection is admitted read-only — the
+//     peer may receive state and live updates but write messages are dropped.
+//     IsReadOnly(r) reports the ro flag after a successful Check.
 //
-// Both parts are compared with crypto/subtle.ConstantTimeCompare. Verifying only
-// a signature (no third-party PKI) keeps this the simplest real option; a JWT /
-// BOARD_JWT_PUBLIC_KEY verifier could be slotted in behind the same interface.
+// Both token parts are compared with crypto/subtle.ConstantTimeCompare.
+// Verifying only a signature (no third-party PKI) keeps this the simplest real
+// option; a JWT / BOARD_JWT_PUBLIC_KEY verifier could be slotted in behind the
+// same interface.
 type Authenticator struct {
-	secret []byte
+	secret  []byte
+	maxTTL  int64    // seconds; 0 = no TTL bound
+	roConns sync.Map // *http.Request → struct{}: tracks ro-flagged connections
 }
 
 // NewAuthenticator builds an authenticator from the configured secret. When the
 // secret is empty, Enabled() is false and Check always allows.
 func NewAuthenticator(cfg AuthConfig) *Authenticator {
-	return &Authenticator{secret: cfg.Secret}
+	return &Authenticator{
+		secret: cfg.Secret,
+		maxTTL: cfg.MaxTokenTTL,
+	}
 }
 
 // Enabled reports whether token verification is active.
@@ -44,7 +57,9 @@ func (a *Authenticator) Enabled() bool { return len(a.secret) > 0 }
 
 // Check is the ygo Server.AuthFunc: it returns true to allow the upgrade. With
 // no secret configured it allows everything (dev). Otherwise it requires a valid
-// `?token=` whose optional room claim matches the requested room.
+// `?token=` whose room claim matches the requested room. On success, if the
+// token carries ro=true, the request is recorded in roConns so IsReadOnly(r)
+// returns true; call Release(r) once the connection closes.
 func (a *Authenticator) Check(r *http.Request) bool {
 	if !a.Enabled() {
 		return true
@@ -53,44 +68,85 @@ func (a *Authenticator) Check(r *http.Request) bool {
 	if token == "" {
 		return false
 	}
-	return a.verify(token, roomFromRequest(r))
+	ro, ok := a.verify(token, roomFromRequest(r))
+	if !ok {
+		return false
+	}
+	if ro {
+		a.roConns.Store(r, struct{}{})
+	}
+	return true
 }
 
-// verify checks the token's HMAC signature and optional exp/room claims.
-func (a *Authenticator) verify(token, room string) bool {
-	payloadB64, sigB64, ok := strings.Cut(token, ".")
-	if !ok || payloadB64 == "" || sigB64 == "" {
-		return false
+// IsReadOnly reports whether the request carried an ro=true claim. Must be
+// called only after Check returned true.
+func (a *Authenticator) IsReadOnly(r *http.Request) bool {
+	_, ok := a.roConns.Load(r)
+	return ok
+}
+
+// Release removes the request's ro entry; call once the connection closes to
+// avoid a memory leak. Safe to call even if the request was not ro-flagged.
+func (a *Authenticator) Release(r *http.Request) {
+	a.roConns.Delete(r)
+}
+
+// verify checks the token's HMAC signature and required claims.
+// Returns (ro, true) on success, (false, false) on failure.
+func (a *Authenticator) verify(token, room string) (ro bool, ok bool) {
+	payloadB64, sigB64, cut := strings.Cut(token, ".")
+	if !cut || payloadB64 == "" || sigB64 == "" {
+		return false, false
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
 	if err != nil {
-		return false
+		return false, false
 	}
 	mac := hmac.New(sha256.New, a.secret)
 	mac.Write([]byte(payloadB64))
 	expected := mac.Sum(nil)
 	if subtle.ConstantTimeCompare(sig, expected) != 1 {
-		return false
+		return false, false
 	}
-	// Signature is valid; enforce optional claims.
+	// Signature is valid; enforce claims.
 	payload, err := base64.RawURLEncoding.DecodeString(payloadB64)
 	if err != nil {
-		return false
+		return false, false
 	}
 	var claims struct {
 		Exp  int64  `json:"exp"`
 		Room string `json:"room"`
+		RO   bool   `json:"ro"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return false
+		return false, false
 	}
-	if claims.Exp > 0 && time.Now().Unix() > claims.Exp {
-		return false
+
+	// exp is REQUIRED (mirrors Node's SECURE-mode policy). Tokens without exp
+	// are permanently valid and must not be accepted — they ride in the URL
+	// and may leak into logs, browser history, or caches.
+	if claims.Exp == 0 {
+		return false, false
 	}
-	if claims.Room != "" && claims.Room != room {
-		return false
+	now := time.Now().Unix()
+	if now > claims.Exp {
+		return false, false // expired
 	}
-	return true
+	// Optional max-TTL bound: reject tokens whose lifetime is suspiciously long.
+	if a.maxTTL > 0 && claims.Exp-now > a.maxTTL {
+		return false, false
+	}
+
+	// room is REQUIRED. A room-less token would act as a master key and
+	// authenticate the bearer for ANY room on this server.
+	if claims.Room == "" {
+		return false, false
+	}
+	if claims.Room != room {
+		return false, false
+	}
+
+	return claims.RO, true
 }
 
 // roomFromRequest extracts the room the same way ygo's Server does: the {room}

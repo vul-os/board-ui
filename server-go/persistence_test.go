@@ -186,7 +186,7 @@ func TestParseEndpoint(t *testing.T) {
 
 func TestAuthenticator(t *testing.T) {
 	secret := []byte("topsecret")
-	a := NewAuthenticator(AuthConfig{Secret: secret})
+	a := NewAuthenticator(AuthConfig{Secret: secret, MaxTokenTTL: 3600})
 	if !a.Enabled() {
 		t.Fatal("authenticator should be enabled with a secret")
 	}
@@ -201,25 +201,31 @@ func TestAuthenticator(t *testing.T) {
 
 	// Valid, room-scoped, unexpired.
 	good := mint(map[string]any{"room": "userid:default", "exp": time.Now().Add(time.Hour).Unix()})
-	if !a.verify(good, "userid:default") {
-		t.Error("valid token rejected")
+	if ro, ok := a.verify(good, "userid:default"); !ok || ro {
+		t.Errorf("valid token rejected or unexpected ro=%v, ok=%v", ro, ok)
 	}
 	// Wrong room.
-	if a.verify(good, "other") {
+	if _, ok := a.verify(good, "other"); ok {
 		t.Error("token accepted for wrong room")
 	}
 	// Expired.
-	expired := mint(map[string]any{"exp": time.Now().Add(-time.Hour).Unix()})
-	if a.verify(expired, "any") {
+	expired := mint(map[string]any{"room": "any", "exp": time.Now().Add(-time.Hour).Unix()})
+	if _, ok := a.verify(expired, "any"); ok {
 		t.Error("expired token accepted")
 	}
 	// Tampered signature.
-	if a.verify(good[:len(good)-2]+"xy", "userid:default") {
+	if _, ok := a.verify(good[:len(good)-2]+"xy", "userid:default"); ok {
 		t.Error("tampered token accepted")
 	}
-	// No-claims token (signature only) is valid for any room.
-	if !a.verify(mint(map[string]any{}), "whatever") {
-		t.Error("unscoped valid token rejected")
+	// No-room token must be rejected (finding 2 — room is now REQUIRED).
+	noRoom := mint(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+	if _, ok := a.verify(noRoom, "whatever"); ok {
+		t.Error("room-less token should be rejected (finding 2)")
+	}
+	// No-exp token must be rejected (finding 3 — exp is now REQUIRED).
+	noExp := mint(map[string]any{"room": "r1"})
+	if _, ok := a.verify(noExp, "r1"); ok {
+		t.Error("exp-less token should be rejected (finding 3)")
 	}
 
 	// Check() via a request carrying ?token=.
