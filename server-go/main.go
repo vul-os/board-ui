@@ -64,6 +64,7 @@ func main() {
 	// LoadConfig(); operators can override via env.
 	srv.MaxConnections = cfg.DoS.MaxConnections
 	srv.MaxPeersPerRoom = cfg.DoS.MaxPeersPerRoom
+	srv.MaxRooms = cfg.DoS.MaxRooms
 	if cfg.DoS.MessageRateLimit > 0 {
 		srv.MessageRateLimit = rate.Limit(cfg.DoS.MessageRateLimit)
 	}
@@ -121,8 +122,8 @@ func main() {
 	} else {
 		log.Printf("auth:        OFF — WARNING: no BOARD_AUTH_SECRET set, all connections accepted (dev only)")
 	}
-	log.Printf("dos caps:    max-conns=%d max-peers-per-room=%d msg-rate=%.0f/s awareness=%dMiB blobs=%dMiB",
-		cfg.DoS.MaxConnections, cfg.DoS.MaxPeersPerRoom,
+	log.Printf("dos caps:    max-conns=%d max-rooms=%d max-peers-per-room=%d msg-rate=%.0f/s awareness=%dMiB blobs=%dMiB",
+		cfg.DoS.MaxConnections, cfg.DoS.MaxRooms, cfg.DoS.MaxPeersPerRoom,
 		cfg.DoS.MessageRateLimit,
 		cfg.DoS.MaxAwarenessBytesPerRoom>>20,
 		cfg.DoS.MaxBlobBytes>>20,
@@ -152,18 +153,35 @@ func main() {
 	}
 }
 
-// buildWSHandler returns the /ws/{room} handler. When auth is enabled,
-// ro-flagged connections are routed to the read-only handler so client-sent
-// update messages are dropped. All other requests go to the ygo srv directly.
+// buildWSHandler returns the /ws/{room} handler. The read-only routing decision
+// is made HERE, after token verification, and before dispatch — this is what
+// fixes the broken-access-control bug: previously the handler consulted
+// auth.IsReadOnly(r) BEFORE ygo's AuthFunc (auth.Check) had run, so the roConns
+// side-effect Check records was always empty at decision time, IsReadOnly always
+// returned false, and every connection — including valid ro=true view-only
+// tokens — fell through to the read/write ygo handler (ServeReadOnly was dead
+// code). Now auth.Verify(r) performs the HMAC + claim checks up-front and the
+// route is chosen from the verified ro flag:
+//
+//   - auth disabled (dev)  → ygo srv (read/write)
+//   - invalid/expired token → 401, reject (fail closed)
+//   - verified ro=true      → ServeReadOnly (drops client writes)
+//   - verified ro=false     → ygo srv (read/write); it re-runs auth.Check via
+//     AuthFunc, which is idempotent and, being read/write, records no roConns
+//     state, so there is no double-record.
 func buildWSHandler(srv *ywebsocket.Server, auth *Authenticator, adapter *Adapter, hub *ReadOnlyHub) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if auth.Enabled() && auth.IsReadOnly(r) {
-			room := r.PathValue("room")
-			defer auth.Release(r)
-			ServeReadOnly(w, r, room, adapter, hub)
-			return
+		if auth.Enabled() {
+			ro, ok := auth.Verify(r)
+			if !ok {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if ro {
+				ServeReadOnly(w, r, r.PathValue("room"), adapter, hub)
+				return
+			}
 		}
-		defer auth.Release(r)
 		srv.ServeHTTP(w, r)
 	})
 }

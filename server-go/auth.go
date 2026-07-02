@@ -78,6 +78,31 @@ func (a *Authenticator) Check(r *http.Request) bool {
 	return true
 }
 
+// Verify parses and HMAC-verifies the request's `?token=` and returns its ro
+// claim, WITHOUT the roConns side-effect that Check records. It is the routing
+// primitive used by buildWSHandler to decide, BEFORE dispatch, whether a
+// connection is read-only, read/write, or must be rejected — closing the
+// broken-access-control hole where IsReadOnly was consulted before ygo's
+// AuthFunc (Check) had run, so the ro flag was never observed.
+//
+// Returns:
+//   - (false, true)  when auth is disabled (dev mode): allow, read/write.
+//   - (ro, true)     for a valid token: ro reflects the verified ro claim.
+//   - (false, false) for a missing/invalid/expired/wrong-room token: reject.
+//
+// Room scope, exp requirement, max-TTL bound, and constant-time signature
+// comparison are all enforced (via verify), identical to Check.
+func (a *Authenticator) Verify(r *http.Request) (ro bool, ok bool) {
+	if !a.Enabled() {
+		return false, true
+	}
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		return false, false
+	}
+	return a.verify(token, roomFromRequest(r))
+}
+
 // IsReadOnly reports whether the request carried an ro=true claim. Must be
 // called only after Check returned true.
 func (a *Authenticator) IsReadOnly(r *http.Request) bool {

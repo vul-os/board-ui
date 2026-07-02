@@ -95,6 +95,12 @@ type DoSConfig struct {
 	// (BOARD_MAX_ROOM_CONNS, default 64). Maps to ygo Server.MaxPeersPerRoom.
 	MaxPeersPerRoom int
 
+	// MaxRooms caps the total number of rooms the server will hold in memory
+	// at once (BOARD_MAX_ROOMS, default 4096). Maps to ygo Server.MaxRooms.
+	// Defense-in-depth: without it a flood of distinct room names could
+	// exhaust memory even under the connection caps. Set to 0 for unlimited.
+	MaxRooms int
+
 	// MessageRateLimit is the sustained inbound-message rate per peer in
 	// messages/second (BOARD_MESSAGE_RATE, default 50). Maps to
 	// ygo Server.MessageRateLimit. Set to 0 to disable.
@@ -118,6 +124,7 @@ const defaultDebounce = 600 * time.Millisecond
 const (
 	defaultMaxConnections           = 1024
 	defaultMaxPeersPerRoom          = 64
+	defaultMaxRooms                 = 4096
 	defaultMessageRateLimit         = 50.0      // msgs/sec per peer
 	defaultMaxAwarenessBytesPerRoom = 100 << 20 // 100 MiB
 	defaultMaxBlobBytes             = 10 << 20  // 10 MiB (matches Node MAX_BLOB_BYTES)
@@ -147,6 +154,7 @@ func LoadConfig() Config {
 		DoS: DoSConfig{
 			MaxConnections:           envInt("BOARD_MAX_CONNS", defaultMaxConnections),
 			MaxPeersPerRoom:          envInt("BOARD_MAX_ROOM_CONNS", defaultMaxPeersPerRoom),
+			MaxRooms:                 envInt("BOARD_MAX_ROOMS", defaultMaxRooms),
 			MessageRateLimit:         envFloat64("BOARD_MESSAGE_RATE", defaultMessageRateLimit),
 			MaxAwarenessBytesPerRoom: envInt64("BOARD_MAX_AWARENESS_BYTES", defaultMaxAwarenessBytesPerRoom),
 			MaxBlobBytes:             envInt64("BOARD_MAX_BLOB_BYTES", defaultMaxBlobBytes),

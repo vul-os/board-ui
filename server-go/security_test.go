@@ -6,11 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	gorillaws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
+	ywebsocket "github.com/reearth/ygo/provider/websocket"
 )
 
 // ─── Auth hardening tests (findings 2 & 3) ────────────────────────────────────
@@ -133,6 +137,106 @@ func TestAuthROClaim(t *testing.T) {
 	a.Release(req)
 	if a.IsReadOnly(req) {
 		t.Error("IsReadOnly should be false after Release")
+	}
+}
+
+// ─── Read-only routing regression test (wave15 — broken access control) ──────
+//
+// Unlike TestAuthROClaim (which calls Check manually before IsReadOnly and thus
+// MASKS the ordering bug), this test drives the REAL /ws/{room} handler wired
+// exactly as main() wires it and asserts which server path each token reaches,
+// distinguishing them by the first server-sent frame:
+//
+//   - ServeReadOnly (write-dropping) sends SyncStep2 first  → frame [0x00, 0x01, …]
+//   - ygo's read/write ServeHTTP     sends SyncStep1 first  → frame [0x00, 0x00, …]
+//
+// Before the fix, a valid ro=true token routed to ygo's read/write handler
+// (IsReadOnly was consulted before Check had recorded roConns), so it would
+// receive a SyncStep1 first — the assertion below would fail.
+func TestBuildWSHandlerReadOnlyRouting(t *testing.T) {
+	secret := []byte("testsecret")
+	auth := NewAuthenticator(AuthConfig{Secret: secret, MaxTokenTTL: 3600})
+
+	// Wire the handler stack identically to main().
+	adapter := NewDiskPersistence(t.TempDir(), defaultDebounce)
+	hub := newReadOnlyHub()
+	srv := ywebsocket.NewServerWithPersistence(adapter)
+	adapter.SetProvider(srv)
+	srv.OnLoadDocument = wireSecurity(LoadConfig(), hub)
+	srv.AuthFunc = auth.Check
+
+	mux := http.NewServeMux()
+	mux.Handle("/ws/{room}", buildWSHandler(srv, auth, adapter, hub))
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	base := "ws" + strings.TrimPrefix(ts.URL, "http")
+
+	const room = "userid:default"
+
+	// dialFirstFrame dials the handler with the given token and returns the
+	// first binary frame the server sends (or the HTTP response on failure).
+	dialFirstFrame := func(t *testing.T, token string) ([]byte, *http.Response, error) {
+		t.Helper()
+		url := base + "/ws/" + room + "?token=" + token
+		conn, resp, err := gorillaws.DefaultDialer.Dial(url, nil)
+		if err != nil {
+			return nil, resp, err
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, rerr := conn.ReadMessage()
+		return data, resp, rerr
+	}
+
+	// 1. A valid ro=true token MUST reach ServeReadOnly (SyncStep2 first).
+	roToken := mintToken(secret, map[string]any{
+		"exp":  time.Now().Add(time.Hour).Unix(),
+		"room": room,
+		"ro":   true,
+	})
+	frame, _, err := dialFirstFrame(t, roToken)
+	if err != nil {
+		t.Fatalf("ro token: dial/read failed: %v", err)
+	}
+	if len(frame) < 2 || frame[0] != 0x00 || frame[1] != 0x01 {
+		t.Errorf("ro token did not reach ServeReadOnly: first frame = %v, want SyncStep2 prefix [0 1] (broken access control regression)", frame[:min(len(frame), 4)])
+	}
+
+	// 2. A valid rw token MUST reach ygo's read/write handler (SyncStep1 first).
+	rwToken := mintToken(secret, map[string]any{
+		"exp":  time.Now().Add(time.Hour).Unix(),
+		"room": room,
+	})
+	frame, _, err = dialFirstFrame(t, rwToken)
+	if err != nil {
+		t.Fatalf("rw token: dial/read failed: %v", err)
+	}
+	if len(frame) < 2 || frame[0] != 0x00 || frame[1] != 0x00 {
+		t.Errorf("rw token did not reach read/write ServeHTTP: first frame = %v, want SyncStep1 prefix [0 0]", frame[:min(len(frame), 4)])
+	}
+
+	// 3. An expired token MUST be rejected before any upgrade (fail closed).
+	expired := mintToken(secret, map[string]any{
+		"exp":  time.Now().Add(-time.Hour).Unix(),
+		"room": room,
+	})
+	_, resp, err := dialFirstFrame(t, expired)
+	if err == nil {
+		t.Fatal("expired token: expected dial to be rejected, but it succeeded")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expired token: want HTTP 401, got resp=%v", resp)
+	}
+
+	// 4. An invalid-signature token MUST also be rejected (fail closed).
+	bad := roToken + "tampered"
+	_, resp, err = dialFirstFrame(t, bad)
+	if err == nil {
+		t.Fatal("tampered token: expected dial to be rejected, but it succeeded")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("tampered token: want HTTP 401, got resp=%v", resp)
 	}
 }
 
